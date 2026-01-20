@@ -92,8 +92,16 @@ class ModelRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        
+        # [Nano-vLLM Fix] 强制至少预热 1 条序列，防止 budget 极小时计算出 0
+        num_seqs = max(1, min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs))
+        
+        # Warmup sequence needs explicit lengths for the new logic
+        seqs = []
+        for _ in range(num_seqs):
+            s = Sequence([0] * max_model_len)
+            s.this_step_token_len = max_model_len # Set warmup length
+            seqs.append(s)
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -132,32 +140,52 @@ class ModelRunner:
         max_seqlen_k = 0
         slot_mapping = []
         block_tables = None
+        
         for seq in seqs:
-            seqlen = len(seq)
-            input_ids.extend(seq[seq.num_cached_tokens:])
-            positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
+            # [Nano-vLLM Mod] Chunking Logic
+            start_idx = seq.processed_token_len
+            length = seq.this_step_token_len
+            end_idx = start_idx + length
+
+            # Slicing input and generating correct positions
+            input_ids.extend(seq.token_ids[start_idx : end_idx])
+            positions.extend(list(range(start_idx, end_idx)))
+            
+            # Attention metadata
+            seqlen_q = length
+            seqlen_k = end_idx # Key length is everything processed so far + current chunk
+            
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
-            if not seq.block_table:    # warmup
+
+            # Slot mapping calculation for the current chunk
+            if not seq.block_table:
                 continue
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
-                start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
-                    end = start + self.block_size
-                else:
-                    end = start + seq.last_block_num_tokens 
-                slot_mapping.extend(list(range(start, end)))
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
+            
+            # Calculate physical slots for [start_idx, end_idx)
+            for i in range(length):
+                curr_ptr = start_idx + i
+                block_idx = seq.block_table[curr_ptr // self.block_size]
+                block_offset = curr_ptr % self.block_size
+                slot = block_idx * self.block_size + block_offset
+                slot_mapping.append(slot)
+
+        # Prepare block tables if needed (for PagedAttention)
+        # We need block tables if:
+        # 1. Prefix caching is used (history exists before this step)
+        # 2. It's a second chunk (seq.processed_token_len > 0)
+        # Simple check: if max_seqlen_k > max_seqlen_q, it means we have history.
+        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
             block_tables = self.prepare_block_tables(seqs)
+
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        
         set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
         return input_ids, positions
 

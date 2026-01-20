@@ -27,6 +27,10 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        
+        # [Nano-vLLM Mod] Track prefill progress
+        self.processed_token_len = 0
+        self.this_step_token_len = 0
 
     def __len__(self):
         return self.num_tokens
@@ -37,6 +41,10 @@ class Sequence:
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
+    
+    @property
+    def is_prefill_finished(self):
+        return self.processed_token_len >= self.num_prompt_tokens
 
     @property
     def num_completion_tokens(self):
@@ -72,12 +80,17 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
+        # [Nano-vLLM Mod] Add processed_token_len and this_step_token_len to serialization
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
-                self.token_ids if self.num_completion_tokens == 0 else self.last_token)
+                self.token_ids if self.num_completion_tokens == 0 else self.last_token,
+                self.processed_token_len, self.this_step_token_len)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:4]
         if self.num_completion_tokens == 0:
-            self.token_ids = state[-1]
+            self.token_ids = state[4]
         else:
-            self.last_token = state[-1]
+            self.last_token = state[4]
+        # [Nano-vLLM Mod] Restore state
+        self.processed_token_len = state[5]
+        self.this_step_token_len = state[6]

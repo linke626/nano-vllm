@@ -49,8 +49,19 @@ class LLMEngine:
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
+        
+        # [Nano-vLLM Mod] Update processed tokens and calculate actual throughput
+        if is_prefill:
+            step_tokens = 0
+            for seq in seqs:
+                seq.processed_token_len += seq.this_step_token_len
+                step_tokens += seq.this_step_token_len
+            num_tokens = step_tokens
+        else:
+            num_tokens = -len(seqs) # Decode throughput
+            
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
-        num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
+        
         return outputs, num_tokens
 
     def is_finished(self):
