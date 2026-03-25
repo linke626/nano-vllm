@@ -148,7 +148,13 @@ class ModelRunner:
             end_idx = start_idx + length
 
             # Slicing input and generating correct positions
-            input_ids.extend(seq.token_ids[start_idx : end_idx])
+            #input_ids.extend(seq.token_ids[start_idx : end_idx])
+            if hasattr(seq, 'token_ids'):
+                # 正常的 Prefill 新客：拥有完整的 token_ids 数组
+                input_ids.extend(seq.token_ids[start_idx : end_idx])
+            else:
+                # 搭顺风车的 Decode 老客：被 IPC 极致压缩过了，只携带了孤零零的 last_token
+                input_ids.append(seq.last_token)
             positions.extend(list(range(start_idx, end_idx)))
             
             # Attention metadata
