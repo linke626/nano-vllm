@@ -79,6 +79,15 @@ class Sequence:
         self.last_token = token_id
         self.num_tokens += 1
 
+    def rewind(self, target_len: int):
+        """Rewind sequence to target length (used by speculative decoding rollback)."""
+        assert 0 < target_len <= self.num_tokens
+        self.token_ids = self.token_ids[:target_len]
+        self.num_tokens = target_len
+        self.last_token = self.token_ids[-1]
+        self.processed_token_len = min(self.processed_token_len, target_len)
+        self.this_step_token_len = 0
+
     def __getstate__(self):
         # [Nano-vLLM Mod] Add processed_token_len and this_step_token_len to serialization
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,

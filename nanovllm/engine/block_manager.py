@@ -110,3 +110,19 @@ class BlockManager:
             self.hash_to_block_id[h] = last_block.block_id
         else:
             assert last_block.hash == -1
+
+    def rewind(self, seq: Sequence, target_len: int):
+        assert 0 < target_len <= len(seq)
+        old_num_blocks = len(seq.block_table)
+        new_num_blocks = (target_len + self.block_size - 1) // self.block_size
+
+        if new_num_blocks < old_num_blocks:
+            for _ in range(old_num_blocks - new_num_blocks):
+                block_id = seq.block_table.pop()
+                block = self.blocks[block_id]
+                block.ref_count -= 1
+                if block.ref_count == 0:
+                    self._deallocate_block(block_id)
+
+        seq.rewind(target_len)
+        seq.num_cached_tokens = min(seq.num_cached_tokens, (target_len // self.block_size) * self.block_size)
